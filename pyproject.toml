@@ -1,0 +1,32 @@
+[project]
+name = "paddle-go-live-sync"
+version = "1.0.0"
+description = "Copy Paddle Billing sandbox catalog and configuration to production."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+keywords = ["paddle", "billing", "sandbox", "go-live", "webhooks"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Office/Business :: Financial",
+]
+
+[project.scripts]
+paddle-go-live-sync = "sync_catalog:main"
+
+[project.urls]
+Repository = "https://github.com/YOUR_USERNAME/paddle-go-live-sync"
+Documentation = "https://github.com/YOUR_USERNAME/paddle-go-live-sync#readme"
+Issues = "https://github.com/YOUR_USERNAME/paddle-go-live-sync/issues"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["sync_catalog"]

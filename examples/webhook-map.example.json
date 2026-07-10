@@ -1,0 +1,3 @@
+{
+  "https://your-ngrok-host.ngrok-free.app/webhooks/paddle": "https://api.yourdomain.com/webhooks/paddle"
+}

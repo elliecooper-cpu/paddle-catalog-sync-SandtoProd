@@ -1,0 +1,18 @@
+.env
+.env.*
+!.env.example
+
+# Local run outputs — never commit reports (they may contain webhook secrets)
+go-live-report.json
+id-mapping.json
+webhook-map.json
+*-report.json
+
+__pycache__/
+*.pyc
+.DS_Store
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
