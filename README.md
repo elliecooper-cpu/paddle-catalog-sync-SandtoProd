@@ -10,6 +10,8 @@ This is a **community tool**, not an official Paddle product. It implements the 
 - **Webhooks** — notification destinations with URL mapping for production
 - **Settings guidance** — dashboard checklist; optional write flags for partner APIs
 - **Idempotent** — safe to re-run; skips entities already synced
+- **Diagnose mode** — compare sandbox vs live catalog counts without writing
+- **Post-sync verify** — lists live products/prices after a real run
 - **Zero dependencies** — Python 3.10+ standard library only
 
 ## Requirements
@@ -48,21 +50,28 @@ No `pip install` is required if you run `python3 sync_catalog.py` directly.
 ## Quick start
 
 ```bash
+# Option 1: environment variables
 export PADDLE_SANDBOX_API_KEY="pdl_sdbx_apikey_..."
 export PADDLE_LIVE_API_KEY="pdl_live_apikey_..."
+
+# Option 2: copy .env.example to .env — the script loads .env automatically
+# (do not commit .env)
+
+# 0. Optional: compare sandbox vs live without writing
+python3 sync_catalog.py --diagnose
 
 # 1. Preview (recommended)
 python3 sync_catalog.py --dry-run
 
 # 2. Sync to production
+#    Writes go-live-report.json by default if you omit --output
 python3 sync_catalog.py \
-  --webhook-host-replace your-ngrok-host.ngrok-free.app api.yourdomain.com \
-  --output go-live-report.json
+  --webhook-host-replace your-ngrok-host.ngrok-free.app api.yourdomain.com
 ```
 
 Configure live checkout URL, tax mode, payment methods, and statement descriptor in the **Paddle live dashboard** (Checkout settings). Those settings are not available to read from sandbox via the public seller API.
 
-Copy `.env.example` to `.env` for local reference — **do not commit** `.env` files.
+After a real sync, confirm products on **https://vendors.paddle.com** (not `sandbox-vendors.paddle.com`).
 
 ## What gets synced
 
@@ -82,8 +91,9 @@ Copy `.env.example` to `.env` for local reference — **do not commit** `.env` f
 
 | Flag | Description |
 |------|-------------|
+| `--diagnose` | Read-only: print sandbox vs live catalog counts, then exit |
 | `--dry-run` | Preview without writing to production |
-| `--output`, `-o` | Save report JSON (IDs, webhook secrets, warnings) |
+| `--output`, `-o` | Save report JSON (IDs, webhook secrets, warnings). Defaults to `go-live-report.json` on real runs |
 | `--mapping` | Load a previous report to skip already-synced entities |
 | `--live-checkout-url` | Optional partner API write: set live default checkout URL |
 | `--default-tax-mode` | Optional partner API write: `location`, `external`, `internal`, or `account_setting` |
@@ -95,9 +105,14 @@ Copy `.env.example` to `.env` for local reference — **do not commit** `.env` f
 | `--skip-webhooks` | Skip notification destinations |
 | `--skip-settings` | Skip settings checklist / optional writes |
 | `--include-archived` | Include archived catalog items |
-| `--partner-id` | Enable `import_meta` writes (Paddle partners) |
+| `--partner-id` | Enable `import_meta` writes (Paddle partners only) |
+| `--preserve-import-meta` | With `--partner-id`, keep sandbox `import_meta` instead of retagging |
 
 See `examples/webhook-map.example.json` for webhook URL mapping format.
+
+### Seller vs partner `import_meta`
+
+For normal seller API keys, the script **strips** any sandbox `import_meta` before creating live entities (sellers cannot write that field). Tracking for re-runs uses `custom_data._paddle_catalog_sync_sandbox_id` instead. Pass `--partner-id` only if you are a Paddle partner and need `import_meta` / `external_id` support.
 
 ## Webhook secrets
 
@@ -140,11 +155,20 @@ git push -u origin main
 
 | Issue | Likely cause |
 |-------|--------------|
-| `forbidden` | API key doesn't match the environment (sandbox vs live) |
-| Tax category error | Category not approved on live account |
+| Products missing after sync | Check **live** dashboard (`vendors.paddle.com`), not sandbox. Run `--diagnose`, then inspect `go-live-report.json` → `errors` |
+| `Found 0 product(s)` | Wrong sandbox API key, or catalog is empty for that account |
+| `forbidden` / create failures | Live key missing `product.write` / `price.write`, or (older bug) sandbox `import_meta` leaking into seller creates — update to latest script |
+| Tax category error | Category not approved on live account (Checkout → Tax) |
 | Webhook skipped | Sandbox URL is localhost — use `--webhook-url-map` or `--webhook-host-replace` |
 | Account settings 403 | Expected for seller keys — configure settings in the live dashboard |
 | Duplicate discount code | A discount with the same code already exists in live |
+
+Useful commands:
+
+```bash
+python3 sync_catalog.py --diagnose
+python3 sync_catalog.py --skip-settings --skip-webhooks   # catalog-only re-run
+```
 
 ## License
 

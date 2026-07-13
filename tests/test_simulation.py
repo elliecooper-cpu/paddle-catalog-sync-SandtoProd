@@ -249,10 +249,21 @@ def test_payload_builders() -> None:
         SANDBOX_PRODUCT, preserve_import_meta=False, use_import_meta=False
     )
     _assert("import_meta" not in product, "seller mode should omit import_meta")
+    _assert(product["type"] == "standard", "product type forced to standard")
     _assert(
         product["custom_data"][sc.SANDBOX_ID_KEY] == SANDBOX_PRODUCT["id"],
         "product custom_data should track sandbox id",
     )
+
+    imported = dict(SANDBOX_PRODUCT)
+    imported["import_meta"] = {
+        "imported_from": "legacy-platform",
+        "external_id": "legacy-pro-1",
+    }
+    stripped = sc.build_product_payload(
+        imported, preserve_import_meta=True, use_import_meta=False
+    )
+    _assert("import_meta" not in stripped, "seller mode must strip sandbox import_meta")
 
     price = sc.build_price_payload(
         SANDBOX_PRODUCT["prices"][0],

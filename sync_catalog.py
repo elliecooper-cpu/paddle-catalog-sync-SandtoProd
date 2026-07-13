@@ -104,6 +104,25 @@ class PaddleAPIError(Exception):
         super().__init__(message)
 
 
+def _encode_query(params: dict[str, Any]) -> str:
+    """Encode query params the way Paddle expects.
+
+    Array filters must be comma-separated values, e.g. status=active,archived
+    — not repeated keys (status=active&status=archived).
+    """
+    encoded: list[tuple[str, str]] = []
+    for key, value in params.items():
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            if not value:
+                continue
+            encoded.append((key, ",".join(str(item) for item in value)))
+        else:
+            encoded.append((key, str(value)))
+    return urlencode(encoded)
+
+
 class PaddleClient:
     def __init__(self, base_url: str, api_key: str, *, partner_id: str | None = None):
         self.base_url = base_url.rstrip("/")
@@ -118,7 +137,7 @@ class PaddleClient:
         params: dict[str, Any] | None = None,
         body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        query = f"?{urlencode(params, doseq=True)}" if params else ""
+        query = f"?{_encode_query(params)}" if params else ""
         url = f"{self.base_url}{path}{query}"
         data = json.dumps(body).encode("utf-8") if body is not None else None
         headers = {
@@ -388,7 +407,11 @@ def build_product_payload(
     use_import_meta: bool,
 ) -> dict[str, Any]:
     payload = _pick_fields(sandbox_product, PRODUCT_CREATE_FIELDS)
+    # Sellers cannot write import_meta unless they are a partner. Always strip
+    # any sandbox import_meta first — leaving it causes POST /products to fail.
+    payload.pop("import_meta", None)
     payload.pop("custom_data", None)
+    payload["type"] = "standard"
     payload["custom_data"] = _with_sandbox_tracking(
         sandbox_product.get("custom_data"),
         sandbox_product["id"],
@@ -412,8 +435,10 @@ def build_price_payload(
     use_import_meta: bool,
 ) -> dict[str, Any]:
     payload = _pick_fields(sandbox_price, PRICE_CREATE_FIELDS)
+    payload.pop("import_meta", None)
     payload["product_id"] = live_product_id
     payload.pop("custom_data", None)
+    payload["type"] = "standard"
     payload["custom_data"] = _with_sandbox_tracking(
         sandbox_price.get("custom_data"),
         sandbox_price["id"],
@@ -444,6 +469,7 @@ def build_discount_payload(
     use_import_meta: bool,
 ) -> dict[str, Any]:
     payload = _pick_fields(sandbox_discount, DISCOUNT_CREATE_FIELDS)
+    payload.pop("import_meta", None)
     payload.pop("custom_data", None)
     payload["custom_data"] = _with_sandbox_tracking(
         sandbox_discount.get("custom_data"),
@@ -495,6 +521,30 @@ def fetch_sandbox_catalog(sandbox: PaddleClient, include_archived: bool) -> list
             if price.get("type") == "standard"
             and (include_archived or price.get("status") == "active")
         ]
+    if not products:
+        # Help diagnose empty catalogs: type filter can hide custom-only accounts,
+        # and missing price.read can omit nested prices.
+        untyped = sandbox.list_all(
+            "/products",
+            params={
+                "include": "prices",
+                "status": ["active", "archived"] if include_archived else ["active"],
+            },
+        )
+        if untyped:
+            custom_count = sum(1 for p in untyped if p.get("type") == "custom")
+            print(
+                f"  Note: sandbox returned {len(untyped)} product(s) without type=standard "
+                f"filter ({custom_count} custom). Catalog sync only copies standard products.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "  Note: sandbox catalog is empty for this API key. Confirm "
+                "PADDLE_SANDBOX_API_KEY belongs to the sandbox account that has products "
+                "(sandbox-vendors.paddle.com).",
+                file=sys.stderr,
+            )
     return products
 
 
@@ -1324,6 +1374,40 @@ def go_live_sync(
             statement_descriptor=statement_descriptor,
         )
 
+    if not dry_run and not skip_catalog:
+        print("\n=== Verify live catalog ===")
+        try:
+            live_products = live.list_all(
+                "/products",
+                params={"include": "prices", "status": ["active"], "type": "standard"},
+            )
+            price_count = sum(len(p.get("prices") or []) for p in live_products)
+            print(
+                f"Live account currently has {len(live_products)} active standard "
+                f"product(s) and {price_count} price(s)."
+            )
+            if not live_products:
+                _append_warning(
+                    report,
+                    "Live catalog still empty after sync. Confirm you are viewing "
+                    "the LIVE dashboard (vendors.paddle.com), not sandbox, and that "
+                    "PADDLE_LIVE_API_KEY belongs to that live account.",
+                )
+            else:
+                for product in live_products[:10]:
+                    print(
+                        f"  - {product.get('name')} ({product.get('id')}) "
+                        f"prices={len(product.get('prices') or [])}"
+                    )
+                if len(live_products) > 10:
+                    print(f"  ... and {len(live_products) - 10} more")
+            report["live_catalog_count"] = {
+                "products": len(live_products),
+                "prices": price_count,
+            }
+        except PaddleAPIError as exc:
+            _append_warning(report, f"Could not verify live catalog: {exc}")
+
     if output_path:
         with open(output_path, "w", encoding="utf-8") as fh:
             json.dump(report, fh, indent=2)
@@ -1350,6 +1434,7 @@ Sandbox keys need read permissions for entities being copied. Live keys need
 matching write permissions. Create keys at Paddle > Developer tools > Authentication.
 
 Examples:
+  python sync_catalog.py --diagnose
   python sync_catalog.py --dry-run
   python sync_catalog.py --output go-live-report.json
   python sync_catalog.py --live-checkout-url https://example.com/checkout \\
@@ -1367,6 +1452,14 @@ Examples:
         "--dry-run",
         action="store_true",
         help="Fetch sandbox data and print actions without creating anything in production.",
+    )
+    parser.add_argument(
+        "--diagnose",
+        action="store_true",
+        help=(
+            "Read-only: print sandbox vs live catalog counts and sample names, "
+            "then exit without writing."
+        ),
     )
     parser.add_argument(
         "--include-archived",
@@ -1497,13 +1590,131 @@ def validate_keys(sandbox_key: str | None, live_key: str | None, dry_run: bool) 
         sys.exit("Live API key looks like a sandbox key (contains '_sdbx'). Aborting.")
 
 
+def diagnose_catalogs(
+    *,
+    sandbox_key: str,
+    live_key: str,
+    include_archived: bool,
+) -> None:
+    """Compare sandbox and live catalog counts without writing."""
+    sandbox = PaddleClient(SANDBOX_BASE_URL, sandbox_key)
+    live = PaddleClient(LIVE_BASE_URL, live_key)
+
+    print("=== Diagnose (read-only) ===")
+    print(f"Sandbox API: {SANDBOX_BASE_URL}")
+    print(f"Live API:    {LIVE_BASE_URL}")
+    print(
+        "Dashboard check: live catalog is at https://vendors.paddle.com "
+        "(sandbox is https://sandbox-vendors.paddle.com)\n"
+    )
+
+    print("Sandbox catalog...")
+    sandbox_products = fetch_sandbox_catalog(sandbox, include_archived)
+    sandbox_prices = sum(len(p.get("prices") or []) for p in sandbox_products)
+    print(f"  standard products: {len(sandbox_products)}")
+    print(f"  standard prices:   {sandbox_prices}")
+    for product in sandbox_products[:10]:
+        print(
+            f"    - {product.get('name')} ({product.get('id')}) "
+            f"tax={product.get('tax_category')} "
+            f"prices={len(product.get('prices') or [])}"
+        )
+    if len(sandbox_products) > 10:
+        print(f"    ... and {len(sandbox_products) - 10} more")
+
+    print("\nLive catalog...")
+    live_products = live.list_all(
+        "/products",
+        params={
+            "include": "prices",
+            "status": ["active", "archived"] if include_archived else ["active"],
+            "type": "standard",
+        },
+    )
+    live_prices = sum(
+        len(
+            [
+                price
+                for price in (product.get("prices") or [])
+                if price.get("type") == "standard"
+            ]
+        )
+        for product in live_products
+    )
+    print(f"  standard products: {len(live_products)}")
+    print(f"  standard prices:   {live_prices}")
+    for product in live_products[:10]:
+        print(
+            f"    - {product.get('name')} ({product.get('id')}) "
+            f"tax={product.get('tax_category')} "
+            f"prices={len(product.get('prices') or [])}"
+        )
+    if len(live_products) > 10:
+        print(f"    ... and {len(live_products) - 10} more")
+
+    print("\nInterpretation:")
+    if not sandbox_products:
+        print("  Sandbox is empty for this key — nothing to copy.")
+    elif not live_products:
+        print(
+            "  Live is empty. Re-run without --diagnose (and without --dry-run) "
+            "with --output go-live-report.json, then check the report for errors."
+        )
+        print(
+            "  Common create failures: tax_category not enabled on live, "
+            "missing product.write/price.write on the live API key, or viewing "
+            "the sandbox dashboard by mistake."
+        )
+    else:
+        print(
+            f"  Live has {len(live_products)} product(s). If the dashboard looks empty, "
+            "confirm you are on vendors.paddle.com with the same seller account "
+            "as PADDLE_LIVE_API_KEY."
+        )
+
+
+def load_dotenv_file(path: str = ".env") -> None:
+    """Load simple KEY=VALUE pairs into os.environ if not already set."""
+    if not os.path.isfile(path):
+        return
+    with open(path, encoding="utf-8") as fh:
+        for raw_line in fh:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip("'").strip('"')
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
 def main() -> None:
+    load_dotenv_file()
     args = parse_args()
+
+    if args.diagnose:
+        validate_keys(args.sandbox_key, args.live_key, dry_run=False)
+        try:
+            diagnose_catalogs(
+                sandbox_key=args.sandbox_key,
+                live_key=args.live_key or "",
+                include_archived=args.include_archived,
+            )
+        except PaddleAPIError as exc:
+            sys.exit(f"Diagnose failed: {exc}")
+        return
+
     validate_keys(args.sandbox_key, args.live_key, args.dry_run)
     webhook_url_map = load_webhook_url_map(args.webhook_url_map)
     webhook_host_replace = (
         tuple(args.webhook_host_replace) if args.webhook_host_replace else None
     )
+
+    output_path = args.output
+    if not args.dry_run and not output_path:
+        output_path = "go-live-report.json"
+        print(f"No --output given; writing report to {output_path}\n")
 
     if args.dry_run:
         print("DRY RUN — no changes will be made in production.\n")
@@ -1518,7 +1729,7 @@ def main() -> None:
         include_archived=args.include_archived,
         preserve_import_meta=args.preserve_import_meta,
         delay_seconds=args.delay,
-        output_path=args.output,
+        output_path=output_path,
         mapping_path=args.mapping,
         live_checkout_url=args.live_checkout_url,
         webhook_url_map=webhook_url_map,
@@ -1535,15 +1746,36 @@ def main() -> None:
         f"\nDone. Created {len(report['products'])} product(s), "
         f"{len(report['prices'])} price(s), {len(report['discounts'])} discount(s), "
         f"{len(report['notification_settings'])} notification destination(s); "
+        f"skipped {len(report['skipped_products'])} product(s) / "
+        f"{len(report['skipped_prices'])} price(s); "
         f"{len(report['errors'])} error(s), {len(report['warnings'])} warning(s)."
     )
+    if report.get("live_catalog_count") is not None:
+        counts = report["live_catalog_count"]
+        print(
+            f"Live catalog after sync: {counts.get('products', 0)} product(s), "
+            f"{counts.get('prices', 0)} price(s)."
+        )
     if report.get("notification_secrets"):
         print(
             "\nNew webhook secrets were created. Save endpoint_secret_key values from "
             "the report — they cannot be retrieved again."
         )
-
+    if report["warnings"]:
+        print("\nWarnings:")
+        for warning in report["warnings"]:
+            print(f"  - {warning}")
     if report["errors"]:
+        print("\nErrors (these prevented some entities from being created):")
+        for error in report["errors"]:
+            entity = error.get("entity", "unknown")
+            name = error.get("name") or error.get("description") or error.get("sandbox_id")
+            print(f"  - [{entity}] {name}: {error.get('error')}")
+        print(
+            "\nTip: open the live dashboard at https://vendors.paddle.com "
+            "(not sandbox-vendors). If creates failed with tax_category errors, "
+            "enable that category under Checkout > Tax in live."
+        )
         sys.exit(1)
 
 
