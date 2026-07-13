@@ -2,13 +2,13 @@
 
 Copy your [Paddle Billing](https://www.paddle.com/) sandbox configuration to production using the Paddle API.
 
-This is a **community tool**, not an official Paddle product. It implements the workflow described in Paddle's [go-live checklist](https://developer.paddle.com/build/go-live-checklist): recreate catalog entities in live, set up webhooks, and mirror account settings.
+This is a **community tool**, not an official Paddle product. It implements the workflow described in Paddle's [go-live checklist](https://developer.paddle.com/build/go-live-checklist): recreate catalog entities in live and set up webhooks. Account settings are configured in the dashboard (they are not readable via the public seller API).
 
 ## Features
 
 - **Catalog** — products, prices, and discounts (with ID remapping)
 - **Webhooks** — notification destinations with URL mapping for production
-- **Settings** — checkout defaults, payment methods, and statement descriptor
+- **Settings guidance** — dashboard checklist; optional write flags for partner APIs
 - **Idempotent** — safe to re-run; skips entities already synced
 - **Zero dependencies** — Python 3.10+ standard library only
 
@@ -56,10 +56,11 @@ python3 sync_catalog.py --dry-run
 
 # 2. Sync to production
 python3 sync_catalog.py \
-  --live-checkout-url https://yourdomain.com/checkout \
   --webhook-host-replace your-ngrok-host.ngrok-free.app api.yourdomain.com \
   --output go-live-report.json
 ```
+
+Configure live checkout URL, tax mode, payment methods, and statement descriptor in the **Paddle live dashboard** (Checkout settings). Those settings are not available to read from sandbox via the public seller API.
 
 Copy `.env.example` to `.env` for local reference — **do not commit** `.env` files.
 
@@ -69,7 +70,7 @@ Copy `.env.example` to `.env` for local reference — **do not commit** `.env` f
 |-------|----------|-------|
 | Catalog | Products, prices, discounts | Remaps `restrict_to` and cross-references to live IDs |
 | Webhooks | Notification destinations | Remaps URLs; saves new `endpoint_secret_key` in the report |
-| Settings | Account, payment methods, statement descriptor | Checkout URL requires `--live-checkout-url` |
+| Settings | Dashboard checklist | No public GET for sandbox settings; optional partner write flags |
 
 ## What does not get synced
 
@@ -84,13 +85,15 @@ Copy `.env.example` to `.env` for local reference — **do not commit** `.env` f
 | `--dry-run` | Preview without writing to production |
 | `--output`, `-o` | Save report JSON (IDs, webhook secrets, warnings) |
 | `--mapping` | Load a previous report to skip already-synced entities |
-| `--live-checkout-url` | Verified production checkout page URL |
+| `--live-checkout-url` | Optional partner API write: set live default checkout URL |
+| `--default-tax-mode` | Optional partner API write: `location`, `external`, `internal`, or `account_setting` |
+| `--statement-descriptor` | Optional partner API write: live statement descriptor name |
 | `--webhook-url-map` | JSON file mapping sandbox → live webhook URLs |
 | `--webhook-host-replace OLD NEW` | Replace hostname in webhook URLs |
 | `--skip-catalog` | Skip products and prices |
 | `--skip-discounts` | Skip discounts |
 | `--skip-webhooks` | Skip notification destinations |
-| `--skip-settings` | Skip account settings |
+| `--skip-settings` | Skip settings checklist / optional writes |
 | `--include-archived` | Include archived catalog items |
 | `--partner-id` | Enable `import_meta` writes (Paddle partners) |
 
@@ -131,7 +134,7 @@ git push -u origin main
 | `forbidden` | API key doesn't match the environment (sandbox vs live) |
 | Tax category error | Category not approved on live account |
 | Webhook skipped | Sandbox URL is localhost — use `--webhook-url-map` or `--webhook-host-replace` |
-| Checkout URL skipped | Pass `--live-checkout-url` with a verified production domain |
+| Account settings 403 | Expected for seller keys — configure settings in the live dashboard |
 | Duplicate discount code | A discount with the same code already exists in live |
 
 ## License

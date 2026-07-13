@@ -88,12 +88,6 @@ NOTIFICATION_CREATE_FIELDS = (
     "subscribed_events",
 )
 
-ACCOUNT_SETTING_FIELDS = (
-    "default_tax_mode",
-    "primary_checkout_color",
-    "saved_payment_methods_enabled",
-)
-
 
 class PaddleAPIError(Exception):
     def __init__(self, status: int, body: dict[str, Any] | str, method: str, path: str):
@@ -483,31 +477,6 @@ def build_notification_payload(
     )
     if payload.get("traffic_source") == "simulation":
         payload["traffic_source"] = "platform"
-    return payload
-
-
-def build_account_settings_payload(
-    sandbox_settings: dict[str, Any],
-    *,
-    live_checkout_url: str | None,
-) -> dict[str, Any]:
-    payload = _pick_fields(sandbox_settings, ACCOUNT_SETTING_FIELDS)
-    if live_checkout_url:
-        payload["default_checkout_url"] = live_checkout_url
-    return payload
-
-
-def build_payment_methods_payload(
-    sandbox_payment_methods: dict[str, Any],
-) -> dict[str, Any]:
-    payload: dict[str, Any] = {}
-    for method, settings in sandbox_payment_methods.items():
-        if not isinstance(settings, dict):
-            continue
-        if "enabled_for_checkout" in settings:
-            payload[method] = {
-                "enabled_for_checkout": settings["enabled_for_checkout"],
-            }
     return payload
 
 
@@ -1182,104 +1151,87 @@ def sync_notification_settings(
 
 def sync_account_settings(
     *,
-    sandbox: PaddleClient,
     live: PaddleClient,
     report: dict[str, Any],
     dry_run: bool,
     delay_seconds: float,
     live_checkout_url: str | None,
+    default_tax_mode: str | None,
+    statement_descriptor: str | None,
 ) -> None:
-    print("Fetching sandbox account settings...")
-    sandbox_settings = sandbox.request("GET", "/settings/account").get("data") or {}
-    account_payload = build_account_settings_payload(
-        sandbox_settings,
-        live_checkout_url=live_checkout_url,
+    """Apply optional live settings from CLI flags.
+
+    Account settings endpoints (`/settings/account`, `/settings/payment-methods`,
+    `/settings/statement-descriptor`) are partner-facing write APIs. There is no
+    public seller GET to read sandbox settings, so this phase does not mirror
+    sandbox — it only PATCHes live when you pass explicit flags.
+    """
+    print(
+        "Account settings cannot be read from sandbox via the public API.\n"
+        "  Mirror these in the live dashboard (or pass write flags below):\n"
+        "  - Checkout > Checkout settings (default payment link, payment methods)\n"
+        "  - Checkout > Sales tax settings\n"
+        "  - Business account > statement / branding as needed"
     )
-    if not live_checkout_url and sandbox_settings.get("default_checkout_url"):
-        sandbox_checkout = sandbox_settings["default_checkout_url"]
-        if "localhost" in sandbox_checkout.lower() or "127.0.0.1" in sandbox_checkout:
-            _append_warning(
-                report,
-                "Skipped default_checkout_url (sandbox uses localhost). "
-                "Pass --live-checkout-url to set the production checkout page.",
-            )
-        else:
-            _append_warning(
-                report,
-                "Skipped default_checkout_url. Pass --live-checkout-url with your "
-                "verified production checkout URL.",
-            )
 
-    if dry_run:
-        print(f"  [dry-run account settings] {json.dumps(account_payload)}")
-    elif account_payload:
-        try:
-            response = live.request("PATCH", "/settings/account", body=account_payload)
-            report["account_settings"] = response.get("data")
-            print("  [updated account settings]")
-            if delay_seconds:
-                time.sleep(delay_seconds)
-        except PaddleAPIError as exc:
-            _append_error(
-                report,
-                {"entity": "account_settings", "error": str(exc)},
-            )
-            print(f"  [error account settings] {exc}", file=sys.stderr)
+    account_payload: dict[str, Any] = {}
+    if live_checkout_url:
+        account_payload["default_checkout_url"] = live_checkout_url
+    if default_tax_mode:
+        account_payload["default_tax_mode"] = default_tax_mode
 
-    try:
-        sandbox_descriptor = (
-            sandbox.request("GET", "/settings/statement-descriptor").get("data") or {}
+    if not account_payload and not statement_descriptor:
+        _append_warning(
+            report,
+            "No settings write flags provided. Skipped API updates — "
+            "configure live account settings in the Paddle dashboard, "
+            "or pass --live-checkout-url / --default-tax-mode / "
+            "--statement-descriptor.",
         )
-        descriptor_name = sandbox_descriptor.get("name")
-        if descriptor_name:
-            if dry_run:
-                print(f"  [dry-run statement descriptor] {descriptor_name}")
-            else:
+        return
+
+    if account_payload:
+        if dry_run:
+            print(f"  [dry-run account settings] {json.dumps(account_payload)}")
+        else:
+            try:
+                response = live.request(
+                    "PATCH",
+                    "/settings/account",
+                    body=account_payload,
+                )
+                report["account_settings"] = response.get("data")
+                print("  [updated account settings]")
+                if delay_seconds:
+                    time.sleep(delay_seconds)
+            except PaddleAPIError as exc:
+                # Partner-only on many accounts — treat as warning, not hard failure.
+                _append_warning(
+                    report,
+                    f"Could not update account settings via API ({exc}). "
+                    "Set these in the live Paddle dashboard instead.",
+                )
+
+    if statement_descriptor:
+        if dry_run:
+            print(f"  [dry-run statement descriptor] {statement_descriptor}")
+        else:
+            try:
                 response = live.request(
                     "PATCH",
                     "/settings/statement-descriptor",
-                    body={"name": descriptor_name},
+                    body={"name": statement_descriptor},
                 )
                 report["statement_descriptor"] = response.get("data")
-                print(f"  [updated statement descriptor] {descriptor_name}")
+                print(f"  [updated statement descriptor] {statement_descriptor}")
                 if delay_seconds:
                     time.sleep(delay_seconds)
-    except PaddleAPIError as exc:
-        _append_error(
-            report,
-            {"entity": "statement_descriptor", "error": str(exc)},
-        )
-        print(f"  [error statement descriptor] {exc}", file=sys.stderr)
-
-    try:
-        sandbox_payment_methods = (
-            sandbox.request("GET", "/settings/payment-methods").get("data") or {}
-        )
-        payment_methods_payload = build_payment_methods_payload(sandbox_payment_methods)
-        if payment_methods_payload:
-            if dry_run:
-                enabled = [
-                    method
-                    for method, settings in payment_methods_payload.items()
-                    if settings.get("enabled_for_checkout")
-                ]
-                print(f"  [dry-run payment methods] enable: {', '.join(enabled)}")
-            else:
-                response = live.request(
-                    "PATCH",
-                    "/settings/payment-methods",
-                    body=payment_methods_payload,
+            except PaddleAPIError as exc:
+                _append_warning(
+                    report,
+                    f"Could not update statement descriptor via API ({exc}). "
+                    "Set this in the live Paddle dashboard instead.",
                 )
-                report["payment_methods"] = response.get("data")
-                print("  [updated payment methods]")
-        else:
-            _append_warning(report, "No payment method settings found in sandbox.")
-    except PaddleAPIError as exc:
-        _append_error(
-            report,
-            {"entity": "payment_methods", "error": str(exc)},
-        )
-        print(f"  [error payment methods] {exc}", file=sys.stderr)
 
 
 def go_live_sync(
@@ -1300,6 +1252,8 @@ def go_live_sync(
     skip_discounts: bool,
     skip_webhooks: bool,
     skip_settings: bool,
+    default_tax_mode: str | None,
+    statement_descriptor: str | None,
 ) -> dict[str, Any]:
     use_import_meta = bool(partner_id)
     sandbox = PaddleClient(SANDBOX_BASE_URL, sandbox_key, partner_id=partner_id)
@@ -1350,12 +1304,13 @@ def go_live_sync(
     if not skip_settings:
         print("\n=== Account settings ===")
         sync_account_settings(
-            sandbox=sandbox,
             live=live,
             report=report,
             dry_run=dry_run,
             delay_seconds=delay_seconds,
             live_checkout_url=live_checkout_url,
+            default_tax_mode=default_tax_mode,
+            statement_descriptor=statement_descriptor,
         )
 
     if output_path:
@@ -1370,8 +1325,8 @@ def go_live_sync(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Copy Paddle Billing sandbox configuration to production "
-            "(catalog, discounts, webhooks, account settings)."
+            "Copy Paddle Billing sandbox catalog and webhooks to production. "
+            "Account settings are dashboard-only for seller API keys."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
@@ -1440,8 +1395,23 @@ Examples:
     parser.add_argument(
         "--live-checkout-url",
         help=(
-            "Production default checkout URL (verified domain). "
-            "Required to mirror sandbox default_checkout_url in live."
+            "Optional: PATCH live default checkout URL "
+            "(partner settings API; may be unavailable for seller-only keys)."
+        ),
+    )
+    parser.add_argument(
+        "--default-tax-mode",
+        choices=["account_setting", "external", "internal", "location"],
+        help=(
+            "Optional: PATCH live default tax mode "
+            "(partner settings API; may be unavailable for seller-only keys)."
+        ),
+    )
+    parser.add_argument(
+        "--statement-descriptor",
+        help=(
+            "Optional: PATCH live statement descriptor name "
+            "(partner settings API; may be unavailable for seller-only keys)."
         ),
     )
     parser.add_argument(
@@ -1473,7 +1443,10 @@ Examples:
     parser.add_argument(
         "--skip-settings",
         action="store_true",
-        help="Skip account settings (checkout, payment methods, descriptor).",
+        help=(
+            "Skip the account settings phase "
+            "(dashboard checklist / optional write flags)."
+        ),
     )
     parser.add_argument(
         "--sandbox-key",
@@ -1543,6 +1516,8 @@ def main() -> None:
         skip_discounts=args.skip_discounts,
         skip_webhooks=args.skip_webhooks,
         skip_settings=args.skip_settings,
+        default_tax_mode=args.default_tax_mode,
+        statement_descriptor=args.statement_descriptor,
     )
 
     print(
