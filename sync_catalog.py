@@ -6,14 +6,15 @@ Paddle sandbox and live are separate accounts with different entity IDs. This
 script reads sandbox data via the API, transforms entities into create/update
 request bodies, and recreates them in production.
 
-Syncs catalog (products, prices, discounts), notification destinations, and
-account settings (checkout defaults, payment methods, statement descriptor).
+Syncs catalog (products, prices, discounts) and notification destinations.
+Account settings are dashboard-only for seller API keys (optional partner
+write flags available).
 
 Usage:
     export PADDLE_SANDBOX_API_KEY="pdl_sdbx_apikey_..."
     export PADDLE_LIVE_API_KEY="pdl_live_apikey_..."
     python sync_catalog.py --dry-run
-    python sync_catalog.py --live-checkout-url https://example.com/checkout -o report.json
+    python sync_catalog.py --output go-live-report.json
 
 See README.md for full documentation.
 """
@@ -586,6 +587,7 @@ def find_existing_product(
     use_import_meta: bool,
     product_id_map: dict[str, str],
     live_products_by_sandbox_id: dict[str, dict[str, Any]],
+    query_live: bool = True,
 ) -> dict[str, Any] | None:
     sandbox_product_id = sandbox_product["id"]
     if sandbox_product_id in product_id_map:
@@ -594,7 +596,7 @@ def find_existing_product(
     if sandbox_product_id in live_products_by_sandbox_id:
         return live_products_by_sandbox_id[sandbox_product_id]
 
-    if use_import_meta:
+    if query_live and use_import_meta:
         external_id = (
             sandbox_product.get("import_meta", {}) or {}
         ).get("external_id", sandbox_product_id)
@@ -612,6 +614,7 @@ def find_existing_price(
     use_import_meta: bool,
     price_id_map: dict[str, str],
     live_prices_by_sandbox_id: dict[str, dict[str, Any]],
+    query_live: bool = True,
 ) -> dict[str, Any] | None:
     sandbox_price_id = sandbox_price["id"]
     if sandbox_price_id in price_id_map:
@@ -620,7 +623,7 @@ def find_existing_price(
     if sandbox_price_id in live_prices_by_sandbox_id:
         return live_prices_by_sandbox_id[sandbox_price_id]
 
-    if use_import_meta:
+    if query_live and use_import_meta:
         price_external_id = (
             sandbox_price.get("import_meta", {}) or {}
         ).get("external_id", sandbox_price_id)
@@ -638,12 +641,17 @@ def find_existing_discount(
     live: PaddleClient,
     discount_id_map: dict[str, str],
     live_discounts_by_sandbox_id: dict[str, dict[str, Any]],
+    query_live: bool = True,
 ) -> dict[str, Any] | None:
     sandbox_discount_id = sandbox_discount["id"]
     if sandbox_discount_id in discount_id_map:
         return {"id": discount_id_map[sandbox_discount_id]}
     if sandbox_discount_id in live_discounts_by_sandbox_id:
         return live_discounts_by_sandbox_id[sandbox_discount_id]
+
+    if not query_live:
+        return None
+
     if use_import_meta:
         external_id = (
             sandbox_discount.get("import_meta", {}) or {}
@@ -734,6 +742,7 @@ def sync_catalog(
             use_import_meta=use_import_meta,
             product_id_map=product_id_map,
             live_products_by_sandbox_id=live_products_by_sandbox_id,
+            query_live=not dry_run,
         )
         if existing:
             live_product_id = existing["id"]
@@ -797,6 +806,7 @@ def sync_catalog(
                 use_import_meta=use_import_meta,
                 price_id_map=price_id_map,
                 live_prices_by_sandbox_id=live_prices_by_sandbox_id,
+                query_live=not dry_run,
             )
             if existing_price:
                 price_id_map[sandbox_price_id] = existing_price["id"]
@@ -949,6 +959,7 @@ def sync_discounts(
             live=live,
             discount_id_map=discount_id_map,
             live_discounts_by_sandbox_id=live_discounts_by_sandbox_id,
+            query_live=not dry_run,
         )
         if existing:
             live_discount_id = existing["id"]

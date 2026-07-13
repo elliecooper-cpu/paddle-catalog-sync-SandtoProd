@@ -111,7 +111,16 @@ When new notification destinations are created, Paddle returns an `endpoint_secr
 4. Swap client-side tokens and remove `Paddle.Environment.set('sandbox')` from your frontend
 5. Complete dashboard-only steps: balance currency, payouts, Retain, domain verification
 
-## Publishing this repo
+## Offline simulation
+
+No Paddle credentials needed:
+
+```bash
+python3 tests/test_simulation.py
+```
+
+This mocks sandbox/live API responses and checks payload building, dry-run behavior,
+webhook URL remapping, create flow, and idempotent re-runs.
 
 To share on GitHub:
 
